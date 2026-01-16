@@ -2,7 +2,7 @@
 # Builds all subsystem modules
 
 # Phase 1: Only core is implemented
-SUBDIRS := core
+SUBDIRS := core monitor policy
 
 .PHONY: all clean install uninstall test help $(SUBDIRS)
 
