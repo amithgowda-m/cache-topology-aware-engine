@@ -214,7 +214,7 @@ static int ctae_add_cpu_to_domain(struct ctae_cache_domain *domain,
 	return 0;
 }
 
-/* Discover L3 cache topology */
+/* Discover L3 cache topology with multiple domains */
 int ctae_discover_cache_topology(void)
 {
 	unsigned int cpu;
@@ -224,14 +224,28 @@ int ctae_discover_cache_topology(void)
 	int ret;
 	char path[128];
 	struct file *filp;
-	char buf[32];
+	char buf[256];
 	loff_t pos = 0;
 	ssize_t bytes;
 	unsigned int l3_size_kb = 0;
+	cpumask_var_t processed_cpus;
+	cpumask_var_t shared_cpus;
+	bool use_sysfs = true;
 	
 	if (!ctae_global_topology) {
 		pr_err("CTAE: Global topology not initialized\n");
 		return -EINVAL;
+	}
+	
+	if (!zalloc_cpumask_var(&processed_cpus, GFP_KERNEL)) {
+		pr_err("CTAE: Failed to allocate processed_cpus mask\n");
+		return -ENOMEM;
+	}
+	
+	if (!zalloc_cpumask_var(&shared_cpus, GFP_KERNEL)) {
+		pr_err("CTAE: Failed to allocate shared_cpus mask\n");
+		free_cpumask_var(processed_cpus);
+		return -ENOMEM;
 	}
 	
 	pr_info("CTAE: Discovering cache topology (L3)...\n");
@@ -259,6 +273,9 @@ int ctae_discover_cache_topology(void)
 			}
 		}
 		filp_close(filp, NULL);
+	} else {
+		use_sysfs = false;
+		pr_warn("CTAE: Cannot access sysfs, will use fallback topology\n");
 	}
 	
 	/* Fallback to CPUID if sysfs failed */
@@ -281,37 +298,192 @@ int ctae_discover_cache_topology(void)
 		cache_info.num_sharing = num_online_cpus();
 	}
 	
-	pr_info("CTAE: L3 Cache: %u KB, %u-way, %u B lines, shared by %u CPUs\n",
+	pr_info("CTAE: L3 Cache: %u KB, %u-way, %u B lines\n",
 	        cache_info.size_kb, cache_info.associativity,
-	        cache_info.line_size, cache_info.num_sharing);
+	        cache_info.line_size);
 	
-	/* Create domain for L3 cache */
-	domain = ctae_create_cache_domain(domain_id, CTAE_CACHE_L3);
-	if (!domain) {
-		pr_err("CTAE: Failed to create cache domain\n");
-		return -ENOMEM;
-	}
-	
-	domain->cache_size_kb = cache_info.size_kb;
-	domain->cache_line_size = cache_info.line_size;
-	domain->associativity = cache_info.associativity;
-	
-	/* Add all online CPUs to this domain */
-	for_each_online_cpu(cpu) {
-		ret = ctae_add_cpu_to_domain(domain, cpu);
-		if (ret) {
-			pr_err("CTAE: Failed to add CPU %u to domain\n", cpu);
-			/* Continue with other CPUs */
+	/* Create multiple domains based on LLC sharing */
+	if (use_sysfs) {
+		/* Read shared_cpu_list for each CPU to identify LLC domains */
+		for_each_online_cpu(cpu) {
+			char *token, *str;
+			unsigned int shared_cpu;
+			
+			/* Skip if already processed */
+			if (cpumask_test_cpu(cpu, processed_cpus))
+				continue;
+			
+			/* Read shared CPU list for this CPU's L3 cache */
+			snprintf(path, sizeof(path),
+			         "/sys/devices/system/cpu/cpu%u/cache/index3/shared_cpu_list",
+			         cpu);
+			
+			pos = 0;
+			filp = filp_open(path, O_RDONLY, 0);
+			if (IS_ERR(filp)) {
+				pr_warn("CTAE: Cannot read shared_cpu_list for CPU %u\n", cpu);
+				continue;
+			}
+			
+			bytes = kernel_read(filp, buf, sizeof(buf) - 1, &pos);
+			filp_close(filp, NULL);
+			
+			if (bytes <= 0)
+				continue;
+			
+			buf[bytes] = '\0';
+			/* Remove trailing newline */
+			if (buf[bytes - 1] == '\n')
+				buf[bytes - 1] = '\0';
+			
+			/* Parse CPU list (format: "0-3,8-11" or "0,1,2,3") */
+			cpumask_clear(shared_cpus);
+			str = buf;
+			while ((token = strsep(&str, ",")) != NULL) {
+				unsigned int start, end;
+				if (sscanf(token, "%u-%u", &start, &end) == 2) {
+					/* Range format */
+					for (shared_cpu = start; shared_cpu <= end && shared_cpu < nr_cpu_ids; shared_cpu++) {
+						cpumask_set_cpu(shared_cpu, shared_cpus);
+					}
+				} else if (sscanf(token, "%u", &start) == 1) {
+					/* Single CPU */
+					if (start < nr_cpu_ids)
+						cpumask_set_cpu(start, shared_cpus);
+				}
+			}
+			
+			/* Create domain for this LLC sharing group */
+			domain = ctae_create_cache_domain(domain_id++, CTAE_CACHE_L3);
+			if (!domain) {
+				pr_err("CTAE: Failed to create cache domain\n");
+				continue;
+			}
+			
+			domain->cache_size_kb = cache_info.size_kb;
+			domain->cache_line_size = cache_info.line_size;
+			domain->associativity = cache_info.associativity;
+			
+			/* Add all CPUs in this sharing group to the domain */
+			for_each_cpu(shared_cpu, shared_cpus) {
+				if (!cpu_online(shared_cpu))
+					continue;
+				
+				ret = ctae_add_cpu_to_domain(domain, shared_cpu);
+				if (ret) {
+					pr_err("CTAE: Failed to add CPU %u to domain\n", shared_cpu);
+					continue;
+				}
+				
+				/* Mark as processed */
+				cpumask_set_cpu(shared_cpu, processed_cpus);
+			}
+			
+			/* Add domain to global topology */
+			spin_lock(&ctae_global_topology->lock);
+			list_add_tail(&domain->list, &ctae_global_topology->cache_domains);
+			ctae_global_topology->num_domains++;
+			spin_unlock(&ctae_global_topology->lock);
+			
+			pr_info("CTAE: Created domain %u with %u CPUs\n",
+			        domain->domain_id, domain->num_cpus);
 		}
 	}
 	
-	/* Add domain to global topology */
-	spin_lock(&ctae_global_topology->lock);
-	list_add_tail(&domain->list, &ctae_global_topology->cache_domains);
-	ctae_global_topology->num_domains++;
+	/* Fallback: create per-socket domains if sysfs failed or no domains created */
+	if (ctae_global_topology->num_domains == 0) {
+		unsigned int socket;
+		cpumask_var_t socket_cpus;
+		
+		pr_info("CTAE: Using per-socket fallback topology\n");
+		
+		if (!zalloc_cpumask_var(&socket_cpus, GFP_KERNEL)) {
+			pr_err("CTAE: Failed to allocate socket_cpus mask\n");
+			free_cpumask_var(processed_cpus);
+			free_cpumask_var(shared_cpus);
+			return -ENOMEM;
+		}
+		
+		cpumask_clear(processed_cpus);
+		
+		for_each_online_cpu(cpu) {
+			if (cpumask_test_cpu(cpu, processed_cpus))
+				continue;
+			
+			socket = topology_physical_package_id(cpu);
+			cpumask_clear(socket_cpus);
+			
+			/* Find all CPUs in this socket */
+			for_each_online_cpu(shared_cpu) {
+				if (topology_physical_package_id(shared_cpu) == socket) {
+					cpumask_set_cpu(shared_cpu, socket_cpus);
+					cpumask_set_cpu(shared_cpu, processed_cpus);
+				}
+			}
+			
+			/* Create domain for this socket */
+			domain = ctae_create_cache_domain(domain_id++, CTAE_CACHE_L3);
+			if (!domain)
+				continue;
+			
+			domain->cache_size_kb = cache_info.size_kb;
+			domain->cache_line_size = cache_info.line_size;
+			domain->associativity = cache_info.associativity;
+			
+			for_each_cpu(shared_cpu, socket_cpus) {
+				ret = ctae_add_cpu_to_domain(domain, shared_cpu);
+				if (ret)
+					continue;
+			}
+			
+			spin_lock(&ctae_global_topology->lock);
+			list_add_tail(&domain->list, &ctae_global_topology->cache_domains);
+			ctae_global_topology->num_domains++;
+			spin_unlock(&ctae_global_topology->lock);
+			
+			pr_info("CTAE: Created socket domain %u with %u CPUs\n",
+			        domain->domain_id, domain->num_cpus);
+		}
+		
+		free_cpumask_var(socket_cpus);
+	}
+	
+	/* Final fallback: if still only 1 domain, split it in half */
+	if (ctae_global_topology->num_domains == 1) {
+		unsigned int half = num_online_cpus() / 2;
+		unsigned int count = 0;
+		
+		pr_warn("CTAE: Only 1 domain detected, creating artificial split for migration testing\n");
+		
+		domain = ctae_create_cache_domain(domain_id++, CTAE_CACHE_L3);
+		if (domain) {
+			domain->cache_size_kb = cache_info.size_kb / 2;
+			domain->cache_line_size = cache_info.line_size;
+			domain->associativity = cache_info.associativity;
+			
+			for_each_online_cpu(cpu) {
+				if (count++ >= half) {
+					ret = ctae_add_cpu_to_domain(domain, cpu);
+					if (ret)
+						continue;
+				}
+			}
+			
+			spin_lock(&ctae_global_topology->lock);
+			list_add_tail(&domain->list, &ctae_global_topology->cache_domains);
+			ctae_global_topology->num_domains++;
+			spin_unlock(&ctae_global_topology->lock);
+			
+			pr_info("CTAE: Created artificial domain %u with %u CPUs\n",
+			        domain->domain_id, domain->num_cpus);
+		}
+	}
+	
 	ctae_global_topology->num_cpus = num_online_cpus();
 	ctae_global_topology->initialized = true;
-	spin_unlock(&ctae_global_topology->lock);
+	
+	free_cpumask_var(processed_cpus);
+	free_cpumask_var(shared_cpus);
 	
 	pr_info("CTAE: Topology discovery complete: %u domains, %u CPUs\n",
 	        ctae_global_topology->num_domains,
@@ -319,6 +491,7 @@ int ctae_discover_cache_topology(void)
 	
 	return 0;
 }
+
 EXPORT_SYMBOL(ctae_discover_cache_topology);
 
 /* Print topology to kernel log */
