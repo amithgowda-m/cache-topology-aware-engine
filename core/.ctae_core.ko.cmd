@@ -1,1 +1,1 @@
-savedcmd_ctae_core.ko := ld -r -m elf_x86_64 -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.14.0-36-generic/scripts/module.lds -o ctae_core.ko ctae_core.o ctae_core.mod.o .module-common.o
+savedcmd_ctae_core.ko := ld -r -m elf_x86_64 -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.14.0-37-generic/scripts/module.lds -o ctae_core.ko ctae_core.o ctae_core.mod.o .module-common.o
