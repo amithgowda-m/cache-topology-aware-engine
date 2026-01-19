@@ -1,51 +1,10 @@
-# CTAE Monitor Module Makefile
+KBUILD_EXTRA_SYMBOLS := $(PWD)/../core/Module.symvers
 obj-m := ctae_monitor.o
-KERNEL_DIR := /lib/modules/$(shell uname -r)/build
+KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
-# Path to core module for symbols
-CORE_DIR := $(PWD)/../core
-
-.PHONY: all clean install uninstall reload info test help
-
 all:
-	@echo "Building CTAE Monitor Module..."
-	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 clean:
-	@echo "Cleaning CTAE Monitor Module..."
-	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean
-	rm -f Module.symvers modules.order
-
-install: all
-	@echo "Installing CTAE Monitor Module..."
-	sudo insmod ctae_monitor.ko
-
-uninstall:
-	@echo "Removing CTAE Monitor Module..."
-	sudo rmmod ctae_monitor 2>/dev/null || true
-
-reload: uninstall install
-	@echo "Module reloaded"
-
-info:
-	@echo "Module Information:"
-	@modinfo ctae_monitor.ko 2>/dev/null || echo "Module not built yet"
-
-test:
-	@echo "=== Module Status ==="
-	@lsmod | grep ctae_monitor || echo "Module not loaded"
-	@echo ""
-	@echo "=== Recent Kernel Messages ==="
-	@sudo dmesg | grep CTAE | tail -40
-
-help:
-	@echo "CTAE Monitor Module Build Targets:"
-	@echo "  all       - Build the module (default)"
-	@echo "  clean     - Remove build artifacts"
-	@echo "  install   - Load module into kernel"
-	@echo "  uninstall - Remove module from kernel"
-	@echo "  reload    - Unload and reload module"
-	@echo "  info      - Display module information"
-	@echo "  test      - Show module status and logs"
-	@echo "  help      - Show this message"
+	$(MAKE) -C $(KDIR) M=$(PWD) clean

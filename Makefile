@@ -1,40 +1,19 @@
-# CTAE Root Makefile
-# Builds all subsystem modules
+.PHONY: all clean core monitor policy
 
-# Phase 1: Only core is implemented
-SUBDIRS := core
+all: core monitor policy
 
-.PHONY: all clean install uninstall test help $(SUBDIRS)
+core:
+	$(MAKE) -C core
 
-all: $(SUBDIRS)
+monitor: core
+	$(MAKE) -C monitor
 
-$(SUBDIRS):
-	$(MAKE) -C $@
+policy: core monitor
+	$(MAKE) -C policy
 
 clean:
-	for dir in $(SUBDIRS); do \
-		$(MAKE) -C $dir clean 2>/dev/null || true; \
-	done
-
-install:
-	$(MAKE) -C core install
-
-uninstall:
-	$(MAKE) -C core uninstall
-
-test:
-	$(MAKE) -C core test
-
-help:
-	@echo "CTAE Build System - Phase 1"
-	@echo "============================"
-	@echo "Targets:"
-	@echo "  all       - Build core module"
-	@echo "  clean     - Clean build artifacts"
-	@echo "  install   - Load core module into kernel"
-	@echo "  uninstall - Remove core module from kernel"
-	@echo "  test      - Check module status and logs"
-	@echo "  help      - Show this message"
-	@echo ""
-	@echo "Quick start:"
-	@echo "  make && sudo make install && make test"
+	$(MAKE) -C core clean
+	$(MAKE) -C monitor clean
+	$(MAKE) -C policy clean
+	find . -type f \( -name '*.o' -o -name '*.ko' -o -name '*.mod' -o -name '*.mod.c' -o -name '*.symvers' -o -name '*.order' -o -name '.*.cmd' \) -delete
+	find . -type d -name '.tmp_versions' -exec rm -rf {} + 2>/dev/null || true

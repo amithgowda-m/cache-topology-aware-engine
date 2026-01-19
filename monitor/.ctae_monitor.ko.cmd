@@ -1,1 +1,0 @@
-savedcmd_ctae_monitor.ko := ld -r -m elf_x86_64 -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.14.0-36-generic/scripts/module.lds -o ctae_monitor.ko ctae_monitor.o ctae_monitor.mod.o .module-common.o
